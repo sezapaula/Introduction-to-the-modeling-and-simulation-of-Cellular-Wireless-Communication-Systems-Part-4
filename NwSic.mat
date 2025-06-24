@@ -1,0 +1,185 @@
+clear all
+clc;
+close all;
+
+%% Definição dos parâmetros gerais da simulação
+tSQUARE = 100;  % tamanho do grid em M
+bT = 10^8;  % largura de banda em Hz
+nChannel = 1;  % número de canais
+UEpot = 1;  % potência de transmissão do usuário
+c = 10^-4;  % constante do modelo de propagação
+nmrUE =9;  % número de usuários
+nmrAP =9;  % número de APs
+k0 = 10^-20; % constante do ruído
+a = 4;  % expoente de pathloss
+
+%% Lógica da formação das posições dos APs e usuários
+APperdim = sqrt(nmrAP); % Essa linha coloca a quantidade de APs ao longo da 'linha' do Grid
+
+% Essa linha cria o vetor APcellular
+APcellular = linspace(tSQUARE / APperdim, tSQUARE, (APperdim)) - tSQUARE / (2 * APperdim);
+
+% Essa linha forma a matriz APcellular
+APcellular = (repmat(APcellular, (APperdim), 1) + 1j * repmat(APcellular.', 1, (APperdim))) * 1;
+
+nmrSetups = 1000;  % número de repetições da simulação
+
+% Geração de posições aleatórias para os usuários
+UElocations = (rand(nmrSetups, nmrUE) + 1i * rand(nmrSetups, nmrUE)) * tSQUARE;
+
+%% Outros parâmetros importantes
+% Cálculo de BC (largura de banda de cada canal)
+bc = bT / nChannel;
+
+% Potência do ruído
+pN = k0 * bc;
+
+
+% Função para cálculo da potência recebida
+PReceiver = @(hor_distances,shadow)shadow .* UEpot .* (c ./ hor_distances.^a);  % potência recebida
+
+sinr = []; %Armazenamento dos valores de SINR
+quant=[]; %Armazenamento da quantidade de SICs
+% Cálculo das potências recebidas
+for i = 1:nmrSetups
+    cont_sic=0;
+    pot_values = zeros(nmrAP, nmrUE);  % Matriz com os valores de path-gain
+    rayleigh_fading = raylrnd(1/sqrt(2), [nmrAP, nmrUE, nChannel]); % Rayleigh fading
+    shadow = lognrnd(0, 2, nmrAP, nmrUE); %Sombreamento
+    for ch=1:nChannel
+        for j = 1:nmrUE
+            distances = abs(UElocations(i, j) - APcellular(:));  % Distância entre o usuário e todos os APs
+            pot_values(:, j) = PReceiver(distances,shadow(:, j)).*rayleigh_fading(:,j,ch).^2;  % Potência recebida
+        end
+    end
+   
+    [~, ue_to_ap] = max(pot_values ,[], 1); % Identificação dos APs de maior path-gain (retorna qual o AP)
+    % Loop que percorre os APs
+    for f = 1:nmrAP
+        ues_f = find(ue_to_ap == f); % Da lista de APs de maior path-gain, procura quais UE estao no AP atual ,retorna quais UEs
+        nmrUE_f = length(ues_f); % armazena quantos UEs estao no AP atual
+        % SIC
+        
+        if nmrUE_f>= 2
+            cont_sic=cont_sic+1;
+            %quant=[quant,cont_sic];
+            % Ordenar UEs por ganho decrescente
+            gains = pot_values(f,ues_f); % identifica quais ganhos do AP atual (retorna os valores)
+            [~, ord] = sort(gains, 'descend'); %Ordena os valores , retorna os indices com relacão ao vetor gain
+            ues_f = ues_f(ord); % organiza os UE  
+
+            for p = 1:nmrUE_f % loop para percorrer os usuarios SIC (UE que estao no AP atual)
+                k = ues_f(p); % Usuario atual 
+
+                % Interferência intra-AP (dos usuários ainda nao cancelados pela SIC)
+                intra_intf = 0;
+                for j = (p+1):nmrUE_f
+                    k_j = ues_f(j);
+                    intra_intf = intra_intf +  pot_values(f,k_j);
+                end
+            % Interferência de UEs de outros APs
+                inter_intf = 0;
+                for m2 = 1:nmrAP % análise por AP
+                    if m2 ~= f % diferencia do AP atual 
+                        other_ues = find(ue_to_ap == m2); % lista dos ue no AP diferente, retorna quem sao os UE
+                        for u = other_ues
+                            inter_intf = inter_intf + pot_values(f,u);
+                        end
+                    end
+                end
+                  sinr_value =   pot_values(f,k) / (intra_intf + inter_intf + pN);
+                  sinr = [sinr, sinr_value];
+            end
+        else
+           if nmrUE_f==1 %caso para somente 1 UE no AP  (sem SIC)
+               k=ues_f(1);
+               inter_intf=0;
+               for m2=1:nmrAP
+                   if m2 ~= f % diferencia do AP atual
+                        other_ues = find(ue_to_ap == m2); % lista dos ue no AP diferente, retorna quem sao os UE
+                        for u = other_ues
+                            inter_intf = inter_intf + pot_values(f,u);
+                        end
+                   end
+                   
+               end
+               sinr_value =   pot_values(f,k) / (inter_intf + pN);
+               sinr = [sinr, sinr_value];
+           end
+        end
+    end
+    quant=[quant,cont_sic];
+end
+
+%% Capacidade de Shannon
+conv_sinr = reshape(sinr,[nmrSetups,nmrUE]); %Ordenamento dos resultados da Capacidade em nmrSetupsx nmrUE
+Shannon=zeros(nmrSetups,nmrUE);
+
+for x = 1:nmrUE
+    for y = 1:nmrSetups
+        Shannon(y, x) = bc * log2(1 + conv_sinr(y, x));  
+    end
+end
+%% Médias diversas
+media=mean(sum(Shannon,2)); %Cálculo da média da sum-capacity
+mediaSic=mean(quant); %Cálculo da média das SICs
+
+Shannon_ord=reshape(Shannon,1,[]); % Ordenando os resultados da capacidade num vetor linha
+
+%% Cálculos dos percentis
+porcento_10 = prctile(Shannon_ord, 10);  % percentil 10
+fprintf('Percentil 10 [Mbos]: %.4f\n', porcento_10 * 1e-6);
+
+porcento_50 = prctile(Shannon_ord, 50);  % percentil 50
+fprintf('Percentil 50 [Mbps]: %.4f\n', porcento_50 * 1e-6);
+
+porcento_90 = prctile(Shannon_ord, 90);  % percentil 90
+fprintf('Percentil 90 [Mbps]: %.4f\n', porcento_90 * 1e-6);
+
+fprintf('Média da soma das capacidades [Mbps]:%.3f\n',media*1e-6);
+fprintf('Média das SICs:%.2f\n',mediaSic);
+
+%% Calcular percentis em Mbps
+percentile_10 = prctile(Shannon_ord, 10) * 1e-6;
+percentile_50 = prctile(Shannon_ord, 50) * 1e-6;
+percentile_90 = prctile(Shannon_ord, 90) * 1e-6;
+histograma=histogram(quant);
+cdf_meanSic=linspace(0,1,nmrSetups);
+
+% Ordenar dados para CDF
+sorted_data = sort(Shannon_ord * 1e-6, 'ascend');
+sorted_sic=sort(quant,'ascend');
+cdf_vals = linspace(0, 1, nmrSetups * nmrUE);
+
+%% Plotagem dos resultados
+figure;
+hold on;
+grid on;
+
+%% CDF
+plot(sorted_data, cdf_vals, 'b-', 'LineWidth', 2);
+
+
+%% Linhas verticais nos percentis
+plot([percentile_10 percentile_10], [0 1], '--b', 'LineWidth', 1.5);
+plot([percentile_50 percentile_50], [0 1], '--k', 'LineWidth', 1.5);
+plot([percentile_90 percentile_90], [0 1], '--r', 'LineWidth', 1.5);
+
+%% Rótulos e legenda
+xlabel('Capacity [Mbps]', 'Interpreter', 'latex');
+ylabel('CDF ', 'Interpreter', 'latex');
+legend({'CDF for MAP-SIC','10th percentile','50th percentile','90th percentile'}, ...
+       'Location', 'best', 'Interpreter', 'latex');
+set(gca, 'FontSize', 16);
+
+%% CDF mean sic
+figure;
+grid on;
+plot(sorted_sic,cdf_meanSic,'r-','LineWidth',2);
+xlabel('SIC activation', 'Interpreter', 'latex');
+ylabel('CDF ', 'Interpreter', 'latex');
+legend({'SIC activation'},'location','southeast', 'Interpreter', 'latex');
+set(gca, 'FontSize', 16);
+
+
+%xlim([0 600]);
